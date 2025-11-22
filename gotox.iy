@@ -1,0 +1,1473 @@
+--[[===========================================================
+ GotoDetect Hub - FINAL DELUXE
+ CP Near + IY WayPoints + Player Teleport + Server Finder Deluxe
+===========================================================]]
+
+-- OPTIONAL: loader supaya script auto jalan lagi setelah server hop
+-- Cara pakai:
+-- 1) Upload script ini ke Pastebin/GitHub raw, ambil URL raw-nya.
+-- 2) Ganti teks "RAW_URL_GOTODETECT" di bawah dengan URL kamu.
+-- 3) Eksekusi HANYA blok loader ini, bukan seluruh file, di executor.
+
+local qtp = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
+local httpget = (syn and syn.request and function(u) return syn.request({Url=u,Method="GET"}).Body end)
+    or (game.HttpGet and function(u) return game:HttpGet(u) end)
+
+if qtp and httpget then
+    local url = "RAW_URL_GOTODETECT" -- <<< GANTI MANUAL
+    qtp("loadstring(game:HttpGet('"..url.."'))()")
+end
+
+-- Jika kamu eksekusi seluruh file ini langsung, loader di atas akan di-skip
+-- dan bagian di bawah ini yang jalan.
+
+---------------------------------------------------------------
+--  PLUGIN DEFINISI
+---------------------------------------------------------------
+
+local Plugin = {
+    PluginName = "GotoDetect",
+    PluginDescription = "CP Near + IY WayPoints + Player + Server Finder",
+    Commands = {}
+}
+
+---------------------------------------------------------------
+--  SERVICES & BRIDGE IY
+---------------------------------------------------------------
+
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local env     = getgenv and getgenv() or _G
+local execCmd = env and rawget(env, "execCmd") or nil
+
+local ChatRemote = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+    and ReplicatedStorage.DefaultChatSystemChatEvents:FindFirstChild("SayMessageRequest")
+
+local IYPrefix = ";"  -- ganti kalau prefix IY kamu beda
+
+local function runIYCommand(cmd)
+    if type(execCmd) == "function" then
+        execCmd(cmd)
+        return
+    end
+    if ChatRemote then
+        ChatRemote:FireServer(IYPrefix .. cmd, "All")
+    end
+end
+
+---------------------------------------------------------------
+--  THEME & STATE
+---------------------------------------------------------------
+
+local THEME = {
+    bg_primary      = Color3.fromRGB(15, 18, 24),
+    bg_secondary    = Color3.fromRGB(21, 25, 33),
+    bg_tertiary     = Color3.fromRGB(31, 36, 48),
+    accent_primary  = Color3.fromRGB(0, 199, 255),
+    text_primary    = Color3.fromRGB(255, 255, 255),
+    text_secondary  = Color3.fromRGB(170, 178, 199),
+    text_muted      = Color3.fromRGB(110, 118, 140),
+    success         = Color3.fromRGB(34, 197, 94),
+    danger          = Color3.fromRGB(239, 68, 68),
+}
+
+local KEYWORDS = {
+    Checkpoint = {"checkpoint","cp","stage","level"},
+}
+
+local State = {
+    Gui         = nil,
+    ActiveTab   = "CP",
+    LastScan    = nil,
+    AutoRunning = false,
+}
+
+local SelectedWP = {}   -- [wp.index] = true
+
+---------------------------------------------------------------
+--  NOTIFY
+---------------------------------------------------------------
+
+local function notify(text)
+    local parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "GotoDetectNotify"
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.IgnoreGuiInset = true
+    sg.ResetOnSpawn = false
+    sg.Parent = parent
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0,280,0,36)
+    lbl.Position = UDim2.new(0.5,-140,0.12,0)
+    lbl.BackgroundColor3 = THEME.bg_secondary
+    lbl.BackgroundTransparency = 0.2
+    lbl.BorderSizePixel = 0
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 13
+    lbl.TextColor3 = THEME.accent_primary
+    lbl.Text = text
+    lbl.Parent = sg
+
+    local corner = Instance.new("UICorner", lbl)
+    corner.CornerRadius = UDim.new(0,10)
+
+    local stroke = Instance.new("UIStroke", lbl)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.4
+    stroke.Color = THEME.accent_primary
+
+    task.delay(1.6,function()
+        if sg.Parent then sg:Destroy() end
+    end)
+end
+
+---------------------------------------------------------------
+--  UTIL GAME
+---------------------------------------------------------------
+
+local function matchAny(str, list)
+    str = str:lower()
+    for _,kw in ipairs(list) do
+        if str:find(kw) then return true end
+    end
+    return false
+end
+
+local function getNumberAtEnd(name)
+    local n = tostring(name):match("(-?%d+)$")
+    return n and tonumber(n) or nil
+end
+
+local function getFullPath(inst)
+    local names = {inst.Name}
+    local p = inst.Parent
+    while p and p ~= game do
+        table.insert(names,1,p.Name)
+        p = p.Parent
+    end
+    return table.concat(names,".")
+end
+
+local function teleportTo(inst)
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local cf
+    if inst:IsA("BasePart") then
+        cf = inst.CFrame
+    elseif inst:IsA("Model") and inst.PrimaryPart then
+        cf = inst.PrimaryPart.CFrame
+    end
+    if not cf then return end
+
+    hrp.CFrame = cf + Vector3.new(0,3,0)
+end
+
+local function teleportToPos(pos)
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    hrp.CFrame = CFrame.new(pos + Vector3.new(0,3,0))
+end
+
+local function getStage()
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if not ls then return nil end
+
+    for _,name in ipairs({"Stage","Stages","CP","Checkpoint","Level"}) do
+        local v = ls:FindFirstChild(name)
+        if v and v:IsA("IntValue") then
+            return v.Value
+        end
+    end
+    return nil
+end
+
+local function waitStageAtLeast(target, timeout)
+    local t0 = tick()
+    timeout = timeout or 3
+    while tick() - t0 < timeout do
+        local s = getStage()
+        if s and s >= target then
+            return true
+        end
+        task.wait(0.1)
+    end
+    return false
+end
+
+local function waitStageChange(prevStage, timeout)
+    timeout = timeout or 8
+    local t0 = tick()
+    while tick() - t0 < timeout do
+        local s = getStage()
+        if s and prevStage and s ~= prevStage then
+            return true,s
+        end
+        task.wait(0.2)
+    end
+    return false,getStage()
+end
+
+---------------------------------------------------------------
+--  WAYPOINTS (Infinite Yield)
+---------------------------------------------------------------
+
+local function getIYWaypoints()
+    if type(WayPoints) ~= "table" then
+        return {}
+    end
+
+    local list = {}
+    for i,wp in ipairs(WayPoints) do
+        if wp.GAME == nil or wp.GAME == game.PlaceId then
+            local c = wp.COORD
+            if type(c) == "table" and c[1] and c[2] and c[3] then
+                table.insert(list,{
+                    index = i,
+                    name  = wp.NAME or ("WP_"..i),
+                    pos   = Vector3.new(c[1],c[2],c[3]),
+                })
+            end
+        end
+    end
+    return list
+end
+
+---------------------------------------------------------------
+--  SCAN CHECKPOINT
+---------------------------------------------------------------
+
+local function scanWorkspace()
+    local results = { Checkpoint = {} }
+
+    local function recurse(parent)
+        for _,obj in ipairs(parent:GetChildren()) do
+            if obj:IsA("BasePart") or obj:IsA("Model") then
+                local lname = obj.Name:lower()
+                if matchAny(lname, KEYWORDS.Checkpoint) then
+                    table.insert(results.Checkpoint,{
+                        instance = obj,
+                        number   = getNumberAtEnd(obj.Name),
+                        name     = obj.Name,
+                        path     = getFullPath(obj),
+                        kind     = "Checkpoint",
+                    })
+                end
+            end
+            recurse(obj)
+        end
+    end
+
+    recurse(workspace)
+    table.sort(results.Checkpoint,function(a,b)
+        return (a.number or 0) < (b.number or 0)
+    end)
+
+    State.LastScan = results
+    return results
+end
+
+---------------------------------------------------------------
+--  SERVER FINDER LOGIC (API games.roblox.com)
+---------------------------------------------------------------
+
+local ServerFinder = {}
+
+local requestFunc do
+    if syn and syn.request then
+        requestFunc = syn.request
+    elseif http and http.request then
+        requestFunc = http.request
+    elseif http_request then
+        requestFunc = http_request
+    elseif fluxus and fluxus.request then
+        requestFunc = fluxus.request
+    elseif request then
+        requestFunc = request
+    end
+end
+
+function ServerFinder.GetServers(cursor)
+    if not requestFunc then
+        return nil, "Executor tidak support HTTP request."
+    end
+
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+        :format(game.PlaceId) -- data: id, playing, maxPlayers, fps, ping, dll [web:508]
+
+    if cursor then
+        url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
+    end
+
+    local res
+    local ok,_ = pcall(function()
+        res = requestFunc({Url = url, Method = "GET"})
+    end)
+
+    if not ok or not res or res.StatusCode ~= 200 then
+        return nil, "Gagal request server list."
+    end
+
+    local data = HttpService:JSONDecode(res.Body)
+    return data,nil
+end
+
+function ServerFinder.FindBestServer()
+    local currentJob = game.JobId
+    local bestServer = nil
+    local bestPlayers = math.huge
+
+    local cursor = nil
+    for page = 1,5 do
+        local data,err = ServerFinder.GetServers(cursor)
+        if not data then break end
+
+        for _,srv in ipairs(data.data or {}) do
+            local playing   = tonumber(srv.playing) or 0
+            local maxPlayer = tonumber(srv.maxPlayers) or 0
+            if srv.id ~= currentJob and playing < maxPlayer then
+                if playing < bestPlayers then
+                    bestPlayers = playing
+                    bestServer = srv
+                end
+            end
+        end
+
+        cursor = data.nextPageCursor
+        if not cursor then break end
+    end
+
+    if not bestServer then
+        return nil, "Tidak ada server lain yang cocok."
+    end
+    return bestServer,nil
+end
+
+function ServerFinder.ServerHopBest()
+    local srv,err = ServerFinder.FindBestServer()
+    if not srv then
+        return false,err
+    end
+
+    TeleportService:TeleportToPlaceInstance(
+        game.PlaceId,
+        srv.id,
+        LocalPlayer
+    ) -- Teleport langsung ke instance server (JobId) tertentu [web:497][web:536]
+
+    local msg = string.format("Server hop → %s (%d/%d)",
+        tostring(srv.id),
+        tonumber(srv.playing) or 0,
+        tonumber(srv.maxPlayers) or 0
+    )
+    return true,msg
+end
+
+---------------------------------------------------------------
+--  BUILD UI
+---------------------------------------------------------------
+
+local function buildUI()
+    if State.Gui and State.Gui.Parent then State.Gui:Destroy() end
+
+    local parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "GotoDetectUI"
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.IgnoreGuiInset = true
+    sg.ResetOnSpawn = false
+    sg.Parent = parent
+
+    State.Gui = sg
+    State.ActiveTab = "CP"
+    State.AutoRunning = false
+
+    local WPRoute = {}
+
+    -- MINI BUTTON
+    local MiniBtn = Instance.new("TextButton")
+    MiniBtn.Size = UDim2.new(0,110,0,26)
+    MiniBtn.Position = UDim2.new(0,20,1,-40)
+    MiniBtn.BackgroundColor3 = THEME.bg_secondary
+    MiniBtn.BackgroundTransparency = 0.3
+    MiniBtn.BorderSizePixel = 0
+    MiniBtn.Font = Enum.Font.GothamBold
+    MiniBtn.TextSize = 13
+    MiniBtn.TextColor3 = THEME.text_primary
+    MiniBtn.Text = "GotoDetect Hub"
+    MiniBtn.Visible = false
+    MiniBtn.Parent = sg
+
+    local MiniCorner = Instance.new("UICorner", MiniBtn)
+    MiniCorner.CornerRadius = UDim.new(0,10)
+
+    -- ROOT
+    local Root = Instance.new("Frame")
+    Root.AnchorPoint = Vector2.new(0.5,0.5)
+    Root.Size = UDim2.new(0.7,0,0.7,0)
+    Root.Position = UDim2.new(0.5,0,0.5,0)
+    Root.BackgroundColor3 = THEME.bg_secondary
+    Root.BackgroundTransparency = 0.18
+    Root.BorderSizePixel = 0
+    Root.Parent = sg
+
+    local RootCorner = Instance.new("UICorner", Root)
+    RootCorner.CornerRadius = UDim.new(0,14)
+
+    local RootStroke = Instance.new("UIStroke", Root)
+    RootStroke.Color = THEME.accent_primary
+    RootStroke.Transparency = 0.75
+    RootStroke.Thickness = 1
+
+    -- DRAG HELPER
+    local function makeDraggable(dragArea, target)
+        local dragging = false
+        local dragStart, startPos
+
+        dragArea.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = target.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                    end
+                end)
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+                local delta = input.Position - dragStart
+                target.Position = UDim2.new(
+                    startPos.X.Scale,
+                    startPos.X.Offset + delta.X,
+                    startPos.Y.Scale,
+                    startPos.Y.Offset + delta.Y
+                )
+            end
+        end)
+    end
+
+    -- HEADER
+    local Header = Instance.new("Frame")
+    Header.Size = UDim2.new(1,0,0,32)
+    Header.BackgroundColor3 = THEME.bg_secondary
+    Header.BackgroundTransparency = 0.25
+    Header.BorderSizePixel = 0
+    Header.Parent = Root
+    makeDraggable(Header, Root)
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(0,200,1,0)
+    Title.Position = UDim2.new(0,14,0,0)
+    Title.BackgroundTransparency = 1
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 16
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.TextColor3 = THEME.text_primary
+    Title.Text = "GotoDetect Hub"
+    Title.Parent = Header
+
+    local Subtitle = Instance.new("TextLabel")
+    Subtitle.Size = UDim2.new(0,260,1,0)
+    Subtitle.Position = UDim2.new(0,160,0,0)
+    Subtitle.BackgroundTransparency = 1
+    Subtitle.Font = Enum.Font.Gotham
+    Subtitle.TextSize = 12
+    Subtitle.TextXAlignment = Enum.TextXAlignment.Left
+    Subtitle.TextColor3 = THEME.text_secondary
+    Subtitle.Text = "CP Near • IY Waypoints • Player • Server Finder Deluxe"
+    Subtitle.Parent = Header
+
+    local MinTop = Instance.new("TextButton")
+    MinTop.Size = UDim2.new(0,60,0,22)
+    MinTop.Position = UDim2.new(1,-150,0.5,-11)
+    MinTop.BackgroundColor3 = THEME.bg_tertiary
+    MinTop.BackgroundTransparency = 0.3
+    MinTop.BorderSizePixel = 0
+    MinTop.Font = Enum.Font.GothamBold
+    MinTop.TextSize = 11
+    MinTop.TextColor3 = THEME.text_secondary
+    MinTop.Text = "MINI"
+    MinTop.Parent = Header
+
+    local MinTopCorner = Instance.new("UICorner", MinTop)
+    MinTopCorner.CornerRadius = UDim.new(0,8)
+
+    local CloseBtn = Instance.new("TextButton")
+    CloseBtn.Size = UDim2.new(0,60,0,22)
+    CloseBtn.Position = UDim2.new(1,-80,0.5,-11)
+    CloseBtn.BackgroundColor3 = THEME.danger
+    CloseBtn.BackgroundTransparency = 0.1
+    CloseBtn.BorderSizePixel = 0
+    CloseBtn.Font = Enum.Font.GothamBold
+    CloseBtn.TextSize = 11
+    CloseBtn.TextColor3 = THEME.text_primary
+    CloseBtn.Text = "CLOSE"
+    CloseBtn.Parent = Header
+
+    local CloseCorner = Instance.new("UICorner", CloseBtn)
+    CloseCorner.CornerRadius = UDim.new(0,8)
+
+    -- BODY
+    local Body = Instance.new("Frame")
+    Body.Size = UDim2.new(1,0,1,-32)
+    Body.Position = UDim2.new(0,0,0,32)
+    Body.BackgroundTransparency = 1
+    Body.Parent = Root
+
+    local LeftNav = Instance.new("Frame")
+    LeftNav.Size = UDim2.new(0.23,0,1,0)
+    LeftNav.BackgroundColor3 = THEME.bg_primary
+    LeftNav.BackgroundTransparency = 0.25
+    LeftNav.BorderSizePixel = 0
+    LeftNav.Parent = Body
+
+    local LeftCorner = Instance.new("UICorner", LeftNav)
+    LeftCorner.CornerRadius = UDim.new(0,14)
+
+    local NavList = Instance.new("UIListLayout", LeftNav)
+    NavList.SortOrder = Enum.SortOrder.LayoutOrder
+    NavList.Padding = UDim.new(0,4)
+
+    local paddingTop = Instance.new("Frame")
+    paddingTop.Size = UDim2.new(1,0,0,8)
+    paddingTop.BackgroundTransparency = 1
+    paddingTop.LayoutOrder = 0
+    paddingTop.Parent = LeftNav
+
+    local function makeNavButton(text, order)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1,-8,0,30)
+        btn.Position = UDim2.new(0,4,0,0)
+        btn.BackgroundColor3 = THEME.bg_tertiary
+        btn.BackgroundTransparency = 0.45
+        btn.BorderSizePixel = 0
+        btn.Font = Enum.Font.Gotham
+        btn.TextSize = 13
+        btn.TextColor3 = THEME.text_secondary
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.Text = "  "..text
+        btn.LayoutOrder = order
+        btn.Parent = LeftNav
+
+        local corner = Instance.new("UICorner", btn)
+        corner.CornerRadius = UDim.new(0,8)
+        return btn
+    end
+
+    local NavCP = makeNavButton("CP Near (Checkpoint)",1)
+    local NavWP = makeNavButton("Waypoints (Infinite Yield)",2)
+    local NavPL = makeNavButton("Player Teleport",3)
+    local NavSV = makeNavButton("Server Finder",4)
+
+    -- user box
+    local UserFrame = Instance.new("Frame")
+    UserFrame.Size = UDim2.new(1,-8,0,40)
+    UserFrame.Position = UDim2.new(0,4,1,-44)
+    UserFrame.BackgroundColor3 = THEME.bg_tertiary
+    UserFrame.BackgroundTransparency = 0.25
+    UserFrame.BorderSizePixel = 0
+    UserFrame.Parent = LeftNav
+
+    local UserCorner = Instance.new("UICorner", UserFrame)
+    UserCorner.CornerRadius = UDim.new(0,10)
+
+    local MeName = Instance.new("TextLabel")
+    MeName.Size = UDim2.new(1,-10,1,0)
+    MeName.Position = UDim2.new(0,6,0,0)
+    MeName.BackgroundTransparency = 1
+    MeName.Font = Enum.Font.GothamBold
+    MeName.TextSize = 12
+    MeName.TextXAlignment = Enum.TextXAlignment.Left
+    MeName.TextColor3 = THEME.text_primary
+    MeName.Text = LocalPlayer.DisplayName.." (@"..LocalPlayer.Name..")"
+    MeName.Parent = UserFrame
+
+    -- RIGHT CONTENT
+    local Content = Instance.new("Frame")
+    Content.Size = UDim2.new(0.77,0,1,0)
+    Content.Position = UDim2.new(0.23,0,0,0)
+    Content.BackgroundColor3 = THEME.bg_primary
+    Content.BackgroundTransparency = 0.25
+    Content.BorderSizePixel = 0
+    Content.Parent = Body
+
+    local ContentCorner = Instance.new("UICorner", Content)
+    ContentCorner.CornerRadius = UDim.new(0,14)
+
+    -- INFO BAR
+    local InfoBar = Instance.new("Frame")
+    InfoBar.Size = UDim2.new(1,0,0,28)
+    InfoBar.BackgroundColor3 = THEME.bg_tertiary
+    InfoBar.BackgroundTransparency = 0.35
+    InfoBar.BorderSizePixel = 0
+    InfoBar.Parent = Content
+
+    local CPBadge = Instance.new("TextLabel")
+    CPBadge.Size = UDim2.new(0.33,-4,1,0)
+    CPBadge.Position = UDim2.new(0,10,0,0)
+    CPBadge.BackgroundTransparency = 1
+    CPBadge.Font = Enum.Font.Gotham
+    CPBadge.TextSize = 11
+    CPBadge.TextXAlignment = Enum.TextXAlignment.Left
+    CPBadge.TextColor3 = THEME.text_secondary
+    CPBadge.Text = "CP: 0"
+    CPBadge.Parent = InfoBar
+
+    local WPBadge = Instance.new("TextLabel")
+    WPBadge.Size = UDim2.new(0.33,-30,1,0)
+    WPBadge.Position = UDim2.new(0.33,10,0,0)
+    WPBadge.BackgroundTransparency = 1
+    WPBadge.Font = Enum.Font.Gotham
+    WPBadge.TextSize = 11
+    WPBadge.TextXAlignment = Enum.TextXAlignment.Left
+    WPBadge.TextColor3 = THEME.text_secondary
+    WPBadge.Text = "WP: 0"
+    WPBadge.Parent = InfoBar
+
+    local ModeLabel = Instance.new("TextLabel")
+    ModeLabel.Size = UDim2.new(0.33,-4,1,0)
+    ModeLabel.Position = UDim2.new(0.66,-10,0,0)
+    ModeLabel.BackgroundTransparency = 1
+    ModeLabel.Font = Enum.Font.Gotham
+    ModeLabel.TextSize = 11
+    ModeLabel.TextXAlignment = Enum.TextXAlignment.Right
+    ModeLabel.TextColor3 = THEME.text_secondary
+    ModeLabel.Text = "Mode: CP"
+    ModeLabel.Parent = InfoBar
+
+    -- PANEL INFO KECIL UNTUK WP
+    local InfoPanel = Instance.new("Frame")
+    InfoPanel.Size = UDim2.new(0,270,0,32)
+    InfoPanel.AnchorPoint = Vector2.new(0.5,1)
+    InfoPanel.Position = UDim2.new(0.5,0,1,-90)
+    InfoPanel.BackgroundColor3 = THEME.bg_tertiary
+    InfoPanel.BackgroundTransparency = 0.25
+    InfoPanel.BorderSizePixel = 0
+    InfoPanel.Visible = false
+    InfoPanel.ZIndex = 50
+    InfoPanel.Parent = sg
+
+    local InfoCorner = Instance.new("UICorner", InfoPanel)
+    InfoCorner.CornerRadius = UDim.new(0,8)
+
+    local InfoStroke = Instance.new("UIStroke", InfoPanel)
+    InfoStroke.Color = THEME.accent_primary
+    InfoStroke.Transparency = 0.6
+    InfoStroke.Thickness = 1
+
+    local InfoText = Instance.new("TextLabel")
+    InfoText.Size = UDim2.new(1,-10,1,-4)
+    InfoText.Position = UDim2.new(0,5,0,2)
+    InfoText.BackgroundTransparency = 1
+    InfoText.Font = Enum.Font.Gotham
+    InfoText.TextSize = 11
+    InfoText.TextColor3 = THEME.text_primary
+    InfoText.TextXAlignment = Enum.TextXAlignment.Left
+    InfoText.Text = "Loop: -  |  WP: -  |  Stage: -  |  Detector: -"
+    InfoText.ZIndex = 51
+    InfoText.Parent = InfoPanel
+
+    makeDraggable(InfoPanel, InfoPanel)
+
+    local function setWPInfo(loopIdx, loopMax, wpIdx, wpMax, stageVal, detectorState)
+        detectorState = detectorState or "stable"
+        InfoText.Text = string.format(
+            "Loop: %d/%d  |  WP: %d/%d  |  Stage: %s  |  Detector: %s",
+            loopIdx, loopMax, wpIdx, wpMax,
+            tostring(stageVal or "-"),
+            detectorState
+        )
+    end
+
+    -- MAIN AREA
+    local PanelArea = Instance.new("Frame")
+    PanelArea.Size = UDim2.new(1,-16,1,-80)
+    PanelArea.Position = UDim2.new(0,8,0,36)
+    PanelArea.BackgroundTransparency = 1
+    PanelArea.Parent = Content
+
+    local function makeScroll()
+        local sf = Instance.new("ScrollingFrame")
+        sf.Size = UDim2.new(1,0,1,0)
+        sf.BackgroundTransparency = 1
+        sf.BorderSizePixel = 0
+        sf.ScrollBarThickness = 3
+        sf.CanvasSize = UDim2.new(0,0,0,0)
+        sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        sf.Parent = PanelArea
+
+        local layout = Instance.new("UIListLayout", sf)
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0,4)
+        return sf
+    end
+
+    local PanelCP   = makeScroll()
+    local PanelWP   = makeScroll()
+    local PanelPL   = makeScroll()
+    local PanelSV   = makeScroll()
+    PanelSV.Visible = false
+
+    -- BOTTOM CONTROLS
+    local Controls = Instance.new("Frame")
+    Controls.Size = UDim2.new(1,-16,0,32)
+    Controls.Position = UDim2.new(0,8,1,-36)
+    Controls.BackgroundTransparency = 1
+    Controls.Parent = Content
+
+    local DelayBox = Instance.new("TextBox")
+    DelayBox.Size = UDim2.new(0,60,1,0)
+    DelayBox.Position = UDim2.new(0,0,0,0)
+    DelayBox.BackgroundColor3 = THEME.bg_tertiary
+    DelayBox.BackgroundTransparency = 0.35
+    DelayBox.BorderSizePixel = 0
+    DelayBox.Font = Enum.Font.Gotham
+    DelayBox.TextSize = 11
+    DelayBox.TextColor3 = THEME.text_primary
+    DelayBox.Text = "0.4"
+    DelayBox.Parent = Controls
+
+    local DelayCorner = Instance.new("UICorner", DelayBox)
+    DelayCorner.CornerRadius = UDim.new(0,6)
+
+    local LoopBox = Instance.new("TextBox")
+    LoopBox.Size = UDim2.new(0,50,1,0)
+    LoopBox.Position = UDim2.new(0,70,0,0)
+    LoopBox.BackgroundColor3 = THEME.bg_tertiary
+    LoopBox.BackgroundTransparency = 0.35
+    LoopBox.BorderSizePixel = 0
+    LoopBox.Font = Enum.Font.Gotham
+    LoopBox.TextSize = 11
+    LoopBox.TextColor3 = THEME.text_primary
+    LoopBox.Text = "1"
+    LoopBox.Parent = Controls
+
+    local LoopCorner = Instance.new("UICorner", LoopBox)
+    LoopCorner.CornerRadius = UDim.new(0,6)
+
+    local ScanBtn = Instance.new("TextButton")
+    ScanBtn.Size = UDim2.new(0,120,1,0)
+    ScanBtn.Position = UDim2.new(0,130,0,0)
+    ScanBtn.BackgroundColor3 = THEME.accent_primary
+    ScanBtn.BackgroundTransparency = 0.05
+    ScanBtn.BorderSizePixel = 0
+    ScanBtn.Font = Enum.Font.GothamBold
+    ScanBtn.TextSize = 11
+    ScanBtn.TextColor3 = THEME.text_primary
+    ScanBtn.Text = "RESCAN"
+    ScanBtn.Parent = Controls
+
+    local ScanCorner = Instance.new("UICorner", ScanBtn)
+    ScanCorner.CornerRadius = UDim.new(0,8)
+
+    local RunBtn = Instance.new("TextButton")
+    RunBtn.Size = UDim2.new(0,120,1,0)
+    RunBtn.Position = UDim2.new(1,-130,0,0)
+    RunBtn.BackgroundColor3 = THEME.accent_primary
+    RunBtn.BackgroundTransparency = 0.05
+    RunBtn.BorderSizePixel = 0
+    RunBtn.Font = Enum.Font.GothamBold
+    RunBtn.TextSize = 12
+    RunBtn.TextColor3 = THEME.text_primary
+    RunBtn.Text = "RUN AUTO: OFF (CP)"
+    RunBtn.Parent = Controls
+
+    local RunCorner = Instance.new("UICorner", RunBtn)
+    RunCorner.CornerRadius = UDim.new(0,10)
+
+    -----------------------------------------------------------
+    --  REFRESH LISTS (CP / WP / PLAYER)
+    -----------------------------------------------------------
+
+    local function clearList(sf)
+        for _,c in ipairs(sf:GetChildren()) do
+            if c:IsA("Frame") or c:IsA("TextLabel") then
+                c:Destroy()
+            end
+        end
+    end
+
+    local function setNavActive(which)
+        State.ActiveTab = which
+        ModeLabel.Text = "Mode: "..which
+        local suffix = (which == "WP") and "WP" or "CP"
+        RunBtn.Text = (State.AutoRunning and "RUN AUTO: ON (" or "RUN AUTO: OFF (")..suffix..")"
+        RunBtn.BackgroundColor3 = State.AutoRunning and THEME.success or THEME.accent_primary
+
+        local function style(btn, active)
+            btn.BackgroundColor3 = active and THEME.accent_primary or THEME.bg_tertiary
+            btn.BackgroundTransparency = active and 0.15 or 0.45
+            btn.TextColor3 = active and THEME.text_primary or THEME.text_secondary
+        end
+
+        style(NavCP, which=="CP")
+        style(NavWP, which=="WP")
+        style(NavPL, which=="Player")
+        style(NavSV, which=="Server")
+
+        PanelCP.Visible = (which=="CP")
+        PanelWP.Visible = (which=="WP")
+        PanelPL.Visible = (which=="Player")
+        PanelSV.Visible = (which=="Server")
+
+        if which ~= "WP" then
+            InfoPanel.Visible = false
+        end
+    end
+
+    NavCP.MouseButton1Click:Connect(function() setNavActive("CP") end)
+    NavWP.MouseButton1Click:Connect(function() setNavActive("WP") end)
+    NavPL.MouseButton1Click:Connect(function() setNavActive("Player") end)
+    NavSV.MouseButton1Click:Connect(function() setNavActive("Server") end)
+
+    -- CP list
+    local function addCPItem(sf,item)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,0,0,34)
+        row.BackgroundColor3 = THEME.bg_tertiary
+        row.BackgroundTransparency = 0.45
+        row.BorderSizePixel = 0
+        row.Parent = sf
+
+        local rowCorner = Instance.new("UICorner", row)
+        rowCorner.CornerRadius = UDim.new(0,8)
+
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(0.7,-4,1,0)
+        nameLabel.Position = UDim2.new(0,8,0,0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.Font = Enum.Font.Gotham
+        nameLabel.TextSize = 11
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        nameLabel.TextColor3 = THEME.text_primary
+        nameLabel.Text = item.name .. (item.number and (" #"..item.number) or "")
+        nameLabel.Parent = row
+
+        local pathLabel = Instance.new("TextLabel")
+        pathLabel.Size = UDim2.new(0.7,-4,1,0)
+        pathLabel.Position = UDim2.new(0,8,0,14)
+        pathLabel.BackgroundTransparency = 1
+        pathLabel.Font = Enum.Font.Gotham
+        pathLabel.TextSize = 9
+        pathLabel.TextXAlignment = Enum.TextXAlignment.Left
+        pathLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        pathLabel.TextColor3 = THEME.text_muted
+        pathLabel.Text = item.path
+        pathLabel.Parent = row
+
+        local TpBtn = Instance.new("TextButton")
+        TpBtn.Size = UDim2.new(0.2,0,0.7,0)
+        TpBtn.Position = UDim2.new(0.78,0,0.15,0)
+        TpBtn.BackgroundColor3 = THEME.accent_primary
+        TpBtn.BackgroundTransparency = 0.1
+        TpBtn.Text = "TP"
+        TpBtn.TextColor3 = THEME.text_primary
+        TpBtn.TextScaled = true
+        TpBtn.Font = Enum.Font.GothamBold
+        TpBtn.BorderSizePixel = 0
+        TpBtn.Parent = row
+
+        local TpCorner = Instance.new("UICorner", TpBtn)
+        TpCorner.CornerRadius = UDim.new(0,6)
+
+        TpBtn.MouseButton1Click:Connect(function()
+            teleportTo(item.instance)
+            notify("TP → "..item.name)
+        end)
+    end
+
+    local function refreshCPList()
+        clearList(PanelCP)
+        local data = State.LastScan or scanWorkspace()
+        for _,it in ipairs(data.Checkpoint) do
+            addCPItem(PanelCP,it)
+        end
+        CPBadge.Text = "CP: "..#(data.Checkpoint)
+    end
+
+    -- WP
+    local function getNearestWPIndex(route)
+        local char = LocalPlayer.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp or #route == 0 then
+            return 1
+        end
+
+        local closestIdx = 1
+        local closestDistSq
+
+        for i,wp in ipairs(route) do
+            local d = wp.pos - hrp.Position
+            local magSq = d.X*d.X + d.Y*d.Y + d.Z*d.Z
+            if not closestDistSq or magSq < closestDistSq then
+                closestDistSq = magSq
+                closestIdx = i
+            end
+        end
+
+        return closestIdx
+    end
+
+    local function updateWPRouteAndBadge()
+        WPRoute = {}
+        local all = getIYWaypoints()
+        for _,wp in ipairs(all) do
+            if SelectedWP[wp.index] then
+                table.insert(WPRoute, wp)
+            end
+        end
+        WPBadge.Text = "WP: "..tostring(#all)
+    end
+
+    local function refreshWPList()
+        clearList(PanelWP)
+        updateWPRouteAndBadge()
+
+        local all = getIYWaypoints()
+        if #all == 0 then
+            local msg = Instance.new("TextLabel")
+            msg.Size = UDim2.new(1,0,0,24)
+            msg.BackgroundTransparency = 1
+            msg.Font = Enum.Font.Gotham
+            msg.TextSize = 11
+            msg.TextColor3 = THEME.text_secondary
+            msg.Text = "Tidak ada Waypoints Infinite Yield (cek menu IY)."
+            msg.Parent = PanelWP
+            return
+        end
+
+        for _,wp in ipairs(all) do
+            local key = wp.index
+            local isSelected = SelectedWP[key] and true or false
+
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1,0,0,34)
+            row.BackgroundColor3 = THEME.bg_tertiary
+            row.BackgroundTransparency = 0.45
+            row.BorderSizePixel = 0
+            row.Parent = PanelWP
+
+            local rc = Instance.new("UICorner", row)
+            rc.CornerRadius = UDim.new(0,8)
+
+            local nameLabel = Instance.new("TextLabel")
+            nameLabel.Size = UDim2.new(0.6,-4,1,0)
+            nameLabel.Position = UDim2.new(0,8,0,0)
+            nameLabel.BackgroundTransparency = 1
+            nameLabel.Font = Enum.Font.Gotham
+            nameLabel.TextSize = 11
+            nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+            nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+            nameLabel.TextColor3 = THEME.text_primary
+            nameLabel.Text = wp.name
+            nameLabel.Parent = row
+
+            local SelBtn = Instance.new("TextButton")
+            SelBtn.Size = UDim2.new(0.18,0,0.7,0)
+            SelBtn.Position = UDim2.new(0.6,0,0.15,0)
+            SelBtn.BackgroundColor3 = isSelected and THEME.success or THEME.bg_tertiary
+            SelBtn.BackgroundTransparency = 0.05
+            SelBtn.Text = isSelected and "✓" or "+"
+            SelBtn.TextColor3 = THEME.text_primary
+            SelBtn.TextScaled = true
+            SelBtn.Font = Enum.Font.GothamBold
+            SelBtn.BorderSizePixel = 0
+            SelBtn.Parent = row
+
+            local sc = Instance.new("UICorner", SelBtn)
+            sc.CornerRadius = UDim.new(0,6)
+
+            SelBtn.MouseButton1Click:Connect(function()
+                isSelected = not isSelected
+                SelBtn.Text = isSelected and "✓" or "+"
+                SelBtn.BackgroundColor3 = isSelected and THEME.success or THEME.bg_tertiary
+
+                if isSelected then
+                    SelectedWP[key] = true
+                else
+                    SelectedWP[key] = nil
+                end
+                updateWPRouteAndBadge()
+            end)
+
+            local TpBtn = Instance.new("TextButton")
+            TpBtn.Size = UDim2.new(0.18,0,0.7,0)
+            TpBtn.Position = UDim2.new(0.8,0,0.15,0)
+            TpBtn.BackgroundColor3 = THEME.accent_primary
+            TpBtn.BackgroundTransparency = 0.1
+            TpBtn.Text = "TP"
+            TpBtn.TextColor3 = THEME.text_primary
+            TpBtn.TextScaled = true
+            TpBtn.Font = Enum.Font.GothamBold
+            TpBtn.BorderSizePixel = 0
+            TpBtn.Parent = row
+
+            local tpc = Instance.new("UICorner", TpBtn)
+            tpc.CornerRadius = UDim.new(0,6)
+
+            TpBtn.MouseButton1Click:Connect(function()
+                teleportToPos(wp.pos)
+                notify("TP → "..wp.name)
+            end)
+        end
+    end
+
+    -- PLAYER PANEL
+    local function refreshPlayers()
+        clearList(PanelPL)
+        for _,plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                local row = Instance.new("Frame")
+                row.Size = UDim2.new(1,0,0,40)
+                row.BackgroundColor3 = THEME.bg_tertiary
+                row.BackgroundTransparency = 0.45
+                row.BorderSizePixel = 0
+                row.Parent = PanelPL
+
+                local rc = Instance.new("UICorner", row)
+                rc.CornerRadius = UDim.new(0,8)
+
+                local nameLabel = Instance.new("TextLabel")
+                nameLabel.Size = UDim2.new(0.7,-4,1,0)
+                nameLabel.Position = UDim2.new(0,8,0,0)
+                nameLabel.BackgroundTransparency = 1
+                nameLabel.Font = Enum.Font.Gotham
+                nameLabel.TextSize = 11
+                nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+                nameLabel.TextColor3 = THEME.text_primary
+                nameLabel.Text = plr.DisplayName.." (@"..plr.Name..")"
+                nameLabel.Parent = row
+
+                local tpBtn = Instance.new("TextButton")
+                tpBtn.Size = UDim2.new(0.2,0,0.7,0)
+                tpBtn.Position = UDim2.new(0.78,0,0.15,0)
+                tpBtn.BackgroundColor3 = THEME.accent_primary
+                tpBtn.BackgroundTransparency = 0.1
+                tpBtn.Text = "TP"
+                tpBtn.TextColor3 = THEME.text_primary
+                tpBtn.TextScaled = true
+                tpBtn.Font = Enum.Font.GothamBold
+                tpBtn.BorderSizePixel = 0
+                tpBtn.Parent = row
+
+                local tpc = Instance.new("UICorner", tpBtn)
+                tpc.CornerRadius = UDim.new(0,6)
+
+                tpBtn.MouseButton1Click:Connect(function()
+                    local char = plr.Character
+                    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        teleportToPos(hrp.Position)
+                    else
+                        notify("Player belum spawn / tidak ada HRP")
+                    end
+                end)
+            end
+        end
+    end
+
+    Players.PlayerAdded:Connect(refreshPlayers)
+    Players.PlayerRemoving:Connect(refreshPlayers)
+
+    -----------------------------------------------------------
+    --  SERVER FINDER DELUXE PANEL (LIST + JOIN + COPY JOIN)
+    -----------------------------------------------------------
+
+    local setcb = setclipboard or toclipboard or (syn and syn.write_clipboard) or function() end
+
+    local function buildServerFinderUI()
+        clearList(PanelSV)
+
+        local header = Instance.new("Frame")
+        header.Size = UDim2.new(1,0,0,34)
+        header.BackgroundTransparency = 1
+        header.Parent = PanelSV
+
+        local AutoBtn = Instance.new("TextButton")
+        AutoBtn.Size = UDim2.new(0,140,1,0)
+        AutoBtn.Position = UDim2.new(0,0,0,0)
+        AutoBtn.BackgroundColor3 = THEME.accent_primary
+        AutoBtn.BackgroundTransparency = 0.05
+        AutoBtn.BorderSizePixel = 0
+        AutoBtn.Font = Enum.Font.GothamBold
+        AutoBtn.TextSize = 11
+        AutoBtn.TextColor3 = THEME.text_primary
+        AutoBtn.Text = "AUTO HOP (BEST)"
+        AutoBtn.Parent = header
+
+        local ac = Instance.new("UICorner", AutoBtn)
+        ac.CornerRadius = UDim.new(0,8)
+
+        local RefreshBtn = Instance.new("TextButton")
+        RefreshBtn.Size = UDim2.new(0,100,1,0)
+        RefreshBtn.Position = UDim2.new(0,150,0,0)
+        RefreshBtn.BackgroundColor3 = THEME.bg_tertiary
+        RefreshBtn.BackgroundTransparency = 0.3
+        RefreshBtn.BorderSizePixel = 0
+        RefreshBtn.Font = Enum.Font.GothamBold
+        RefreshBtn.TextSize = 11
+        RefreshBtn.TextColor3 = THEME.text_primary
+        RefreshBtn.Text = "REFRESH"
+        RefreshBtn.Parent = header
+
+        local rc = Instance.new("UICorner", RefreshBtn)
+        rc.CornerRadius = UDim.new(0,8)
+
+        local status = Instance.new("TextLabel")
+        status.Size = UDim2.new(1,-260,1,0)
+        status.Position = UDim2.new(0,260,0,0)
+        status.BackgroundTransparency = 1
+        status.Font = Enum.Font.Gotham
+        status.TextSize = 11
+        status.TextColor3 = THEME.text_secondary
+        status.TextXAlignment = Enum.TextXAlignment.Left
+        status.Text = "Status: -"
+        status.Parent = header
+
+        -- ukur FPS lokal sekali
+        local function measureFPS()
+            local rs = game:GetService("RunService")
+            local t1 = tick()
+            local frames = 0
+            while tick() - t1 < 0.5 do
+                rs.RenderStepped:Wait()
+                frames += 1
+            end
+            return math.floor(frames / 0.5 + 0.5)
+        end
+
+        local function loadServers()
+            status.Text = "Status: mengambil server..."
+            for _,c in ipairs(PanelSV:GetChildren()) do
+                if c ~= header then
+                    c:Destroy()
+                end
+            end
+
+            task.spawn(function()
+                local data,err = ServerFinder.GetServers(nil)
+                if not data then
+                    status.Text = "Status: "..tostring(err or "gagal.")
+                    return
+                end
+
+                local servers = data.data or {}
+                status.Text = "Status: ditemukan "..tostring(#servers).." server."
+
+                local fps = measureFPS()
+
+                for _,srv in ipairs(servers) do
+                    local row = Instance.new("Frame")
+                    row.Size = UDim2.new(1,0,0,70)
+                    row.BackgroundColor3 = THEME.bg_tertiary
+                    row.BackgroundTransparency = 0.45
+                    row.BorderSizePixel = 0
+                    row.Parent = PanelSV
+
+                    local rcorner = Instance.new("UICorner", row)
+                    rcorner.CornerRadius = UDim.new(0,8)
+
+                    local txt = Instance.new("TextLabel")
+                    txt.Size = UDim2.new(0.7,-4,1,0)
+                    txt.Position = UDim2.new(0,8,0,0)
+                    txt.BackgroundTransparency = 1
+                    txt.Font = Enum.Font.Gotham
+                    txt.TextSize = 11
+                    txt.TextXAlignment = Enum.TextXAlignment.Left
+                    txt.TextYAlignment = Enum.TextYAlignment.Top
+                    txt.TextWrapped = true
+                    txt.TextColor3 = THEME.text_primary
+
+                    local playing = tonumber(srv.playing) or 0
+                    local maxp    = tonumber(srv.maxPlayers) or 0
+                    local ping    = srv.ping or "?"
+                    local jobId   = tostring(srv.id)
+
+                    txt.Text = string.format(
+                        "Ping: %s ms    FPS: %d
+Players: %d/%d
+Game ID: %d
+ID: %s",
+                        tostring(ping), fps, playing, maxp, game.PlaceId, jobId
+                    )
+                    txt.Parent = row
+
+                    local JoinBtn = Instance.new("TextButton")
+                    JoinBtn.Size = UDim2.new(0.22,0,0.45,0)
+                    JoinBtn.Position = UDim2.new(0.75,0,0.1,0)
+                    JoinBtn.BackgroundColor3 = THEME.accent_primary
+                    JoinBtn.BackgroundTransparency = 0.05
+                    JoinBtn.BorderSizePixel = 0
+                    JoinBtn.Font = Enum.Font.GothamBold
+                    JoinBtn.TextSize = 11
+                    JoinBtn.TextColor3 = THEME.text_primary
+                    JoinBtn.Text = "Join"
+                    JoinBtn.Parent = row
+
+                    local jc = Instance.new("UICorner", JoinBtn)
+                    jc.CornerRadius = UDim.new(0,8)
+
+                    local CopyBtn = Instance.new("TextButton")
+                    CopyBtn.Size = UDim2.new(0.22,0,0.35,0)
+                    CopyBtn.Position = UDim2.new(0.75,0,0.55,0)
+                    CopyBtn.BackgroundColor3 = THEME.bg_tertiary
+                    CopyBtn.BackgroundTransparency = 0.15
+                    CopyBtn.BorderSizePixel = 0
+                    CopyBtn.Font = Enum.Font.GothamBold
+                    CopyBtn.TextSize = 10
+                    CopyBtn.TextColor3 = THEME.text_primary
+                    CopyBtn.Text = "Copy Join"
+                    CopyBtn.Parent = row
+
+                    local cc = Instance.new("UICorner", CopyBtn)
+                    cc.CornerRadius = UDim.new(0,8)
+
+                    JoinBtn.MouseButton1Click:Connect(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId, LocalPlayer)
+                    end)
+
+                    CopyBtn.MouseButton1Click:Connect(function()
+                        local s = string.format(
+                            "game:GetService('TeleportService'):TeleportToPlaceInstance(%d, '%s', game:GetService('Players').LocalPlayer)",
+                            game.PlaceId, jobId
+                        )
+                        setcb(s)
+                        notify("Join code dicopy ke clipboard")
+                    end)
+                end
+            end)
+        end
+
+        RefreshBtn.MouseButton1Click:Connect(loadServers)
+
+        AutoBtn.MouseButton1Click:Connect(function()
+            status.Text = "Status: mencari server terbaik..."
+            task.spawn(function()
+                local ok,msg = ServerFinder.ServerHopBest()
+                if not ok then
+                    status.Text = "Status: "..tostring(msg)
+                    notify("Auto hop gagal: "..tostring(msg))
+                else
+                    status.Text = "Status: "..msg
+                    notify(msg)
+                end
+            end)
+        end)
+
+        loadServers()
+    end
+
+    -----------------------------------------------------------
+    --  SCAN INIT
+    -----------------------------------------------------------
+
+    local function doScan()
+        local data = scanWorkspace()
+        State.LastScan = data
+        refreshCPList()
+        refreshWPList()
+    end
+
+    doScan()
+    refreshPlayers()
+    buildServerFinderUI()
+    setNavActive("CP")
+
+    -----------------------------------------------------------
+    --  AUTO RUN (CP & WP)
+    -----------------------------------------------------------
+
+    RunBtn.MouseButton1Click:Connect(function()
+        local suffix = (State.ActiveTab == "WP") and "WP" or "CP"
+
+        if State.AutoRunning then
+            State.AutoRunning = false
+            RunBtn.Text = "RUN AUTO: OFF ("..suffix..")"
+            RunBtn.BackgroundColor3 = THEME.accent_primary
+            InfoPanel.Visible = false
+            notify("Auto Run dihentikan")
+            return
+        end
+
+        local delay = tonumber(DelayBox.Text) or 0.4
+        local loops = tonumber(LoopBox.Text) or 1
+        if loops < 1 then loops = 1 end
+
+        -- MODE WP
+        if State.ActiveTab == "WP" then
+            if #WPRoute == 0 then
+                notify("Pilih waypoint dulu di tab WP (+)")
+                return
+            end
+
+            local startIndex = getNearestWPIndex(WPRoute)
+
+            State.AutoRunning = true
+            RunBtn.Text = "RUN AUTO: ON (WP)"
+            RunBtn.BackgroundColor3 = THEME.success
+
+            local curStage = getStage() or 0
+
+            InfoPanel.Visible = true
+            setWPInfo(1, loops, startIndex, #WPRoute, curStage, "stable")
+
+            notify("Auto Run WP ("..#WPRoute.." titik) • mulai dari WP #"..tostring(startIndex)..
+                   " • stage sekarang: "..tostring(curStage))
+
+            task.spawn(function()
+                for l = 1, loops do
+                    if not State.AutoRunning then break end
+
+                    local firstIdx = (l == 1) and startIndex or 1
+
+                    for i = firstIdx, #WPRoute do
+                        if not State.AutoRunning then break end
+                        local wp = WPRoute[i]
+
+                        local prevStage = getStage() or curStage
+                        curStage = prevStage
+                        setWPInfo(l, loops, i, #WPRoute, curStage, "stable")
+
+                        teleportToPos(wp.pos)
+
+                        local detectorState = "stable"
+                        if prevStage then
+                            detectorState = "stuck"
+                            setWPInfo(l, loops, i, #WPRoute, prevStage, detectorState)
+
+                            local ok,newStage = waitStageChange(prevStage, 8)
+                            if ok then
+                                curStage = newStage or curStage
+                                detectorState = "stable"
+                            else
+                                -- kalau mau stop ketika CP nggak kebaca, uncomment:
+                                -- State.AutoRunning = false
+                                -- notify("Stage tidak berubah di WP "..i.." (CP mungkin tidak kebaca)")
+                                -- break
+                            end
+                        end
+
+                        setWPInfo(l, loops, i, #WPRoute, curStage, detectorState)
+                        task.wait(delay)
+                    end
+                end
+
+                State.AutoRunning = false
+                RunBtn.Text = "RUN AUTO: OFF (WP)"
+                RunBtn.BackgroundColor3 = THEME.accent_primary
+                InfoPanel.Visible = false
+                notify("Auto Run WP selesai")
+            end)
+
+            return
+        end
+
+        -- MODE CP
+        local data = State.LastScan or scanWorkspace()
+        local route = {}
+        for _,cp in ipairs(data.Checkpoint) do
+            table.insert(route,cp)
+        end
+        if #route == 0 then
+            notify("Tidak ada Checkpoint terdeteksi")
+            return
+        end
+
+        table.sort(route,function(a,b)
+            local na = a.number or 0
+            local nb = b.number or 0
+            return na < nb
+        end)
+
+        State.AutoRunning = true
+        RunBtn.Text = "RUN AUTO: ON (CP)"
+        RunBtn.BackgroundColor3 = THEME.success
+        notify("Auto Run CP x"..loops.." ("..#route.." CP)")
+
+        task.spawn(function()
+            for l = 1, loops do
+                if not State.AutoRunning then break end
+                RunBtn.Text = string.format("RUN AUTO: ON (CP) [%d/%d]", l, loops)
+
+                for _,node in ipairs(route) do
+                    if not State.AutoRunning then break end
+                    teleportTo(node.instance)
+
+                    if node.kind == "Checkpoint" and node.number then
+                        local ok = waitStageAtLeast(node.number, 3)
+                        if not ok then
+                            local cur = getStage()
+                            notify("CP "..tostring(node.number)..
+                                   " tidak kebaca (stage sekarang: "..tostring(cur or "?")..") - Auto stop")
+                            State.AutoRunning = false
+                            RunBtn.Text = "RUN AUTO: OFF (CP)"
+                            RunBtn.BackgroundColor3 = THEME.accent_primary
+                            return
+                        end
+                    end
+
+                    task.wait(delay)
+                end
+            end
+
+            State.AutoRunning = false
+            RunBtn.Text = "RUN AUTO: OFF (CP)"
+            RunBtn.BackgroundColor3 = THEME.accent_primary
+            notify("Auto Run CP selesai")
+        end)
+    end)
+
+    -- RESCAN
+    ScanBtn.MouseButton1Click:Connect(function()
+        doScan()
+    end)
+
+    -- MINI & CLOSE
+    MinTop.MouseButton1Click:Connect(function()
+        Root.Visible = false
+        MiniBtn.Visible = true
+    end)
+
+    MiniBtn.MouseButton1Click:Connect(function()
+        Root.Visible = true
+        MiniBtn.Visible = false
+    end)
+
+    CloseBtn.MouseButton1Click:Connect(function()
+        if State.Gui then State.Gui:Destroy() end
+    end)
+end
+
+---------------------------------------------------------------
+--  REGISTER COMMAND (Infinite Yield)
+---------------------------------------------------------------
+
+Plugin.Commands["gotodetect"] = {
+    ListName = "GotoDetect",
+    Description = "CP + IY WayPoints + Player + Server Finder Deluxe",
+    Aliases = {"gdetect"},
+    Function = function(args,speaker)
+        buildUI()
+        notify("GotoDetect Hub loaded")
+    end
+}
+
+return Plugin
