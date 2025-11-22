@@ -14,7 +14,7 @@ local httpget = (syn and syn.request and function(u) return syn.request({Url=u,M
     or (game.HttpGet and function(u) return game:HttpGet(u) end)
 
 if qtp and httpget then
-    local url = "RAW_URL_GOTODETECT" -- <<< GANTI MANUAL
+    local url = "https://raw.githubusercontent.com/zanworld/autosummit/refs/heads/main/gotox.iy" -- <<< GANTI MANUAL
     qtp("loadstring(game:HttpGet('"..url.."'))()")
 end
 
@@ -1469,5 +1469,6 @@ Plugin.Commands["gotodetect"] = {
         notify("GotoDetect Hub loaded")
     end
 }
+
 
 return Plugin
